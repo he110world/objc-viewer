@@ -39,26 +39,121 @@ const debug_opts = {
 		offset:-8
 	}
 }
-let last_obj
-function handleDrop(e) {
-	const file = e.dataTransfer.files[0]
+
+function traverse_file_tree(item, cb) {
+	if (item.isFile) {
+		if (typeof cb==='function') {
+			item.file(cb)
+		}
+	} else if (item.isDirectory) {
+		var dir_reader = item.createReader()
+		dir_reader.readEntries(function(entries) {
+			//让图片排在模型前面
+			entries.sort((a,b)=>get_file_type(b)-get_file_type(a))
+
+			for (let i=0; i<entries.length; i++) {
+				traverse_file_tree(entries[i], cb)
+			}
+		})
+	}
+}
+
+const FileType = {
+	UNKNOWN:0,
+
+	DIRECTORY:1,
+
+	OBJC:2,
+	OBJC_GZ:3,
+	FBX:4,
+
+	PNG:10,
+	JPG:11,
+}
+
+function get_file_type(file){
+	const name = file.name
+	if (name.indexOf('.')===-1) {
+		return FileType.DIRECTORY
+	}
+	if (name.endsWith('.objc.gz')) {
+		return FileType.OBJC_GZ
+	}
+
+	let type = FileType.UNKNOWN
+	const postfix = name.slice(name.lastIndexOf('.'))
+	switch(postfix){
+		case '.objc':
+			type = FileType.OBJC
+			break
+		case '.fbx':
+			type = FileType.FBX
+			break
+		case '.png':
+			type = FileType.PNG
+			break
+		case '.jpg':
+		case '.jpeg':
+			type = FileType.JPG
+			break
+	}
+	return type
+}
+
+function read_file(file){
+	const file_type = get_file_type(file)
+	if (!file_type) {
+		return
+	}
+
 	const reader = new FileReader()
 	reader.onload = function(evt){
 		try{
-			if (last_obj) {
-				scene.remove(last_obj)
-			}
-
 			const buf = evt.target.result
-			const str = pako.inflate(buf,{to:'string'})
-			const obj = JSON.parse(str)
-			last_obj = load_objc(obj,debug_opts)
+			if (file_type===FileType.OBJC || file_type===FileType.OBJC_GZ) {
+				let str
+				if (file_type===FileType.OBJC_GZ) {
+					str = pako.inflate(buf,{to:'string'})
+				} else {
+					if (!decoder) {
+						decoder = new TextDecoder('utf-8')
+					}
+					str = decoder.decode(buf)
+				}
+				const obj = JSON.parse(str)
+				last_obj = load_objc(obj,debug_opts)
+			} else if (file_type===FileType.FBX) {
+				if (!fbx_loader) {
+					fbx_loader = new THREE.FBXLoader()
+				}
+				last_obj = fbx_loader.parse(buf)
+				scene.add(last_obj)
+			} else if (file_type===FileType.PNG) {
+				window.image_dict[file.name] = window.URL.createObjectURL( new Blob( [buf], { type: 'image/png'} ) )
+			} else if (file_type===FileType.JPG) {
+				window.image_dict[file.name] = window.URL.createObjectURL( new Blob( [buf], { type: 'image/jpeg'} ) )
+			}
 		}catch(e){
 			alert('something wrong!')
 			console.log(e)
 		}
 	}
 	reader.readAsArrayBuffer(file)
+}
+
+let last_obj, decoder, fbx_loader
+function handleDrop(e) {
+	if (last_obj) {
+		scene.remove(last_obj)
+	}
+	window.image_dict = {}
+
+	for(let i=0; i<e.dataTransfer.items.length; i++){
+		const item = e.dataTransfer.items[i].webkitGetAsEntry()
+		if (item) {
+			traverse_file_tree(item, read_file)
+		}
+	}
 }
 
 if (!Detector.webgl) {
@@ -78,6 +173,9 @@ function get_color(idx) {
 	idx %= color_palette.length
 	return color_palette[idx]
 }
+
+
+//把fbx转成objc
 
 
 function load_objc(obj,opts){
