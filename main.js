@@ -72,7 +72,7 @@ const FileType = {
 }
 
 function get_file_type(file){
-	const name = file.name
+	const name = file.name.toLowerCase()
 	if (name.indexOf('.')===-1) {
 		return FileType.DIRECTORY
 	}
@@ -100,6 +100,7 @@ function get_file_type(file){
 	return type
 }
 
+let need_rescale = false
 function read_file(file){
 	const file_type = get_file_type(file)
 	if (!file_type) {
@@ -121,13 +122,27 @@ function read_file(file){
 					str = decoder.decode(buf)
 				}
 				const obj = JSON.parse(str)
-				last_obj = load_objc(obj,debug_opts)
+				current_obj = load_objc(obj,debug_opts)
 			} else if (file_type===FileType.FBX) {
 				if (!fbx_loader) {
 					fbx_loader = new THREE.FBXLoader()
 				}
-				last_obj = fbx_loader.parse(buf)
-				scene.add(last_obj)
+				const obj = fbx_loader.parse(buf)
+
+				//fbx单位已经被转成米了
+				//再转成经纬度*1000
+				//1度=1000单位=111km=111*1000米
+				//=>1单位=111米
+				//=>1米=1/111单位
+				//const s = 1/11100
+				//obj.scale.set(s,s,s)
+				scene.add(obj)
+
+				//因为要rescale，所以先隐藏起来，缩放完了再显示
+				obj.visible = false
+				current_obj = obj
+
+				need_rescale = true
 			} else if (file_type===FileType.PNG) {
 				window.image_dict[file.name] = window.URL.createObjectURL( new Blob( [buf], { type: 'image/png'} ) )
 			} else if (file_type===FileType.JPG) {
@@ -141,12 +156,46 @@ function read_file(file){
 	reader.readAsArrayBuffer(file)
 }
 
-let last_obj, decoder, fbx_loader
+function rescale_model(fuzzy_meters){
+	const bb = new THREE.Box3()
+	bb.expandByObject(current_obj)
+
+	const bs = new THREE.Sphere()
+	bb.getBoundingSphere(bs)
+
+	const r = bs.radius
+	const num_digit = fuzzy_meters.toString().length
+	const min_meter = Math.pow(10,num_digit-1)
+	const max_meter = Math.pow(10,num_digit)
+
+	const unit_per_meter = 1/111
+	const min_unit = unit_per_meter * min_meter
+	const max_unit = unit_per_meter * max_meter
+	let scale = 1
+	if (r < min_unit) {
+		do{
+			scale *= 10
+		}while(r*scale<min_unit)
+	} else if (r > max_unit) {
+		do{
+			scale /= 10
+		}while(r*scale>max_unit)
+	}
+	
+	current_obj.scale.x *= scale
+	current_obj.scale.y *= scale
+	current_obj.scale.z *= scale
+
+	current_obj.visible = true
+}
+
+let current_obj, decoder, fbx_loader
 function handleDrop(e) {
-	if (last_obj) {
-		scene.remove(last_obj)
+	if (current_obj) {
+		scene.remove(current_obj)
 	}
 	window.image_dict = {}
+	need_rescale = false
 
 	for(let i=0; i<e.dataTransfer.items.length; i++){
 		const item = e.dataTransfer.items[i].webkitGetAsEntry()
@@ -174,9 +223,23 @@ function get_color(idx) {
 	return color_palette[idx]
 }
 
+function create_line(p1,p2,color){
+	const m = new THREE.LineBasicMaterial({color:color})
+	const g = new THREE.Geometry()
+	g.vertices.push(p1, p2)
+	const line = new THREE.Line(g,m)
+	return line
+}
 
-//把fbx转成objc
-
+function init_coord_gizmo(){
+	const group = new THREE.Group()
+	const origin = new THREE.Vector3(0,0,0)
+	const line_x = create_line(origin, new THREE.Vector3(1000,0,0), 'red')
+	const line_y = create_line(origin, new THREE.Vector3(0,1000,0), 'green')
+	const line_z = create_line(origin, new THREE.Vector3(0,0,1000), 'blue')
+	group.add(line_x,line_y,line_z)
+	scene.add(group)
+}
 
 function load_objc(obj,opts){
 	opts = opts || {}
@@ -218,7 +281,6 @@ function init() {
 
 
 	scene = new THREE.Scene();
-	lighting = false;
 
 	renderer = new THREE.WebGLRenderer({antialias:true});
 	renderer.setPixelRatio(window.devicePixelRatio);
@@ -232,6 +294,8 @@ function init() {
 	controls.enableDamping = true;
 	controls.dampingFactor = 0.25;
 	controls.enableZoom = false;
+
+	init_coord_gizmo()
 
 
 	window.addEventListener('resize', onWindowResize, false);
@@ -276,7 +340,25 @@ function onKeyboardEvent(e) {
 
 }
 
+const rescale_dlg = document.getElementById('rescale-dlg')
+const rescale_confirm_btn = document.getElementById('rescale-confirm-btn')
+const rescale_cancel_btn = document.getElementById('rescale-cancel-btn')
+rescale_confirm_btn.addEventListener('click',function(){
+	const sel = document.getElementById('rescale-select')
+	rescale_model(sel.value)
+})
+
+rescale_confirm_btn.addEventListener('click',function(){
+	current_obj.visible = true
+})
+
 function animate() {
+
+	if (need_rescale) {
+		rescale_dlg.showModal()
+
+		need_rescale = false
+	}
 
 	requestAnimationFrame(animate);
 
