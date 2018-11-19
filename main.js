@@ -114,11 +114,6 @@ function read_file(file){
 			if (file_type===FileType.OBJC || file_type===FileType.OBJC_GZ) {
 				let str
 				if (file_type===FileType.OBJC_GZ) {
-					//const inflate = new Zlib.Inflate(buf)
-					//const str2 = inflate.decompress()
-					   //var inflate = new Zlib.Inflate( new Uint8Array( reader.getArrayBuffer( compressedLength ) ) )
-					   //var reader2 = new BinaryReader( inflate.decompress().buffer );
-
 					str = pako.inflate(buf,{to:'string'})
 				} else {
 					if (!decoder) {
@@ -194,12 +189,21 @@ function handleDrop(e) {
 	window.image_dict = {}
 	need_rescale = false
 
+	const item_list = []
 	for(let i=0; i<e.dataTransfer.items.length; i++){
 		const item = e.dataTransfer.items[i].webkitGetAsEntry()
 		if (item) {
-			traverse_file_tree(item, read_file)
+			item_list.push(item)
 		}
 	}
+
+	//先加载图片
+	item_list.sort((a,b)=>get_file_type(b)-get_file_type(a))
+
+	item_list.forEach(function(item){
+		traverse_file_tree(item, read_file)
+	})
+
 }
 
 if (!Detector.webgl) {
@@ -217,7 +221,9 @@ const color_palette = [0x65daf7,0xa8f43d,0x3c9302,0xabf94a,0x7ce299,0x28e251,0xc
 
 function get_color(idx) {
 	idx %= color_palette.length
-	return color_palette[idx]
+	const color = new THREE.Color()
+	color.setHex(color_palette[idx])
+	return color
 }
 
 function create_line(p1,p2,color){
@@ -238,22 +244,261 @@ function init_coord_gizmo(){
 	scene.add(group)
 }
 
+function TextureColorPicker (image) {
+	const canvas = document.createElement( 'canvas' );
+	canvas.width = image.width;
+	canvas.height = image.height;
+
+	const context = canvas.getContext( '2d' );
+	context.drawImage( image, 0, 0 );
+
+	this.image_data = context.getImageData( 0, 0, image.width, image.height );
+}
+
+function round_decimal(n,d){
+	const p = Math.pow(10,d)
+	return Math.floor(n*p)/p
+}
+
+TextureColorPicker.prototype.pick = function(u,v){
+	const w = this.image_data.width
+	const h = this.image_data.height
+	const x = Math.floor(u*w)
+	const y = Math.floor((1-v)*h)
+	const i = ( x + w * y ) * 4; 
+	const data = this.image_data.data;
+	const r = round_decimal(data[i]/255,4)
+	const g = round_decimal(data[i+1]/255,4)
+	const b = round_decimal(data[i+2]/255,4)
+	const a = round_decimal(data[i+3]/255,4)
+	return {r:r,g:g,b:b,a:a}
+}
+
+function mesh_to_objc(mesh, scale){
+	scale = scale || 1
+	const geom = {}
+	const meta = {}
+
+	//没有顶点色，有纹理，需要采样顶点色
+	if (!mesh.geometry.attributes.color && mesh.material.map && mesh.material.map.image) {
+		const tex = new TextureColorPicker(mesh.material.map.image)
+		const position = []
+		const color = []
+		const uv = []
+		let normal
+
+		//把三角形完全拆开
+		const positions = mesh.geometry.attributes.position.array
+		let normals
+	       	if (mesh.geometry.attributes.normal) {
+			normals = mesh.geometry.attributes.normal.array
+			normal = []
+		}
+		const uvs = mesh.geometry.attributes.uv.array
+		if (mesh.geometry.index) {
+			const indices = mesh.geometry.index.array
+			for(let i=0; i<indices.length; i++){
+				const idx = indices[i]*3
+				const x = positions[idx]
+				const y = positions[idx+1]
+				const z = positions[idx+2]
+				position.push(x,y,z)
+
+				/*
+				if (normals) {
+					normal.push(normals[idx], normals[idx+1], normals[idx+2])
+				}
+			       */
+
+				const idx_uv = indices[i]*2
+				const u = uvs[idx_uv]
+				const v = uvs[idx_uv+1]
+				uv.push(u,v)
+			}
+		} else {
+			for(let i=0; i<positions.length; i++){
+				position.push(positions[i])
+			}
+			for(let i=0; i<uvs.length; i++){
+				uv.push(uvs[i])
+			}
+			if (normals) {
+				for(let i=0; i<normals.length; i++){
+					normal.push(normals[i])
+				}
+			}
+		}
+
+		//旋转
+		const k = scale * mesh.scale.x
+		const v = new THREE.Vector3()
+		for(let i=0; i<position.length; i+=3){
+			const x = k * position[i]
+			const y = k * position[i+1]
+			const z = k * position[i+2]
+			v.set(x,y,z)
+			v.applyEuler(mesh.rotation)
+			position[i] = round_decimal(v.x,7)
+			position[i+1] = round_decimal(v.y,7)
+			position[i+2] = round_decimal(v.z,7)
+		}
+		//旋转法线
+		/*
+		if(normal){
+			for(let i=0; i<normal.length; i+=3){
+				const x = normal[i]
+				const y = normal[i+1]
+				const z = normal[i+2]
+				v.set(x,y,z)
+				v.applyEuler(mesh.rotation)
+				normal[i] = v.x
+				normal[i+1] = v.y
+				normal[i+2] = v.z
+			}
+		}
+	       */
+
+		for(let i=0; i<uv.length; i+=2){
+			const u = uv[i]
+			const v = uv[i+1]
+			const c = tex.pick(u,v)
+			color.push(c.r,c.g,c.b)
+		}
+
+		//合并颜色相同的顶点
+		geom.position = {
+			array:position,
+			size:3,
+			count:position.length/3
+		}
+		geom.color = {
+			array:color,
+			size:3,
+			count:color.length/3
+		}
+		/*
+		if(normal){
+			geom.normal = {
+				array:normal,
+				size:3,
+				count:normal.length/3
+			}
+		}
+	       */
+	} else {
+		const color = []
+		if (mesh.geometry.attributes.position) {
+			const list = []
+			const k = scale * mesh.scale.x
+			const v = new THREE.Vector3()
+			const attr = mesh.geometry.attributes.position
+			for(let i=0; i<attr.array.length; i+=3){
+				const x = k*attr.array[i]
+				const y = k*attr.array[i+1]
+				const z = k*attr.array[i+2]
+				v.set(x,y,z)
+
+				//旋转
+				v.applyEuler(mesh.rotation)
+				list.push(round_decimal(v.x,7),round_decimal(v.y,7),round_decimal(v.z,7))
+			}
+			geom.position = {
+				array:list,
+				size:attr.itemSize,
+				count:attr.count
+			}
+		}
+		if (mesh.geometry.index) {
+			const list = []
+			const arr = mesh.geometry.index.array
+			for(let i=0; i<arr.length; i++){
+				list.push(arr[i])
+			}
+			geom.index = {
+				array:list,
+				size:attr.itemSize,
+				count:attr.count
+			}
+		}
+		//颜色
+		if (Array.isArray(mesh.material) && Array.isArray(mesh.geometry.groups)) {
+			for(let i=0; i<mesh.geometry.groups.length; i++){
+				const mat_group = mesh.geometry.groups[i]
+				const mat = mesh.material[mat_group.materialIndex]
+				for(let j=0; j<mat_group.count; j++){
+					const r = round_decimal(mat.color.r,4)
+					const g = round_decimal(mat.color.g,4)
+					const b = round_decimal(mat.color.b,4)
+					color.push(r, g, b)
+				}
+			}
+			geom.color = {
+				array:color,
+				size:3,
+				count:color.length/3
+			}
+		} else {
+			const col = mesh.material.color
+			meta.color = {r:col.r, g:col.g, b:col.b}
+		}
+	}
+	return {geometry:geom, meta:meta}
+}
+
+function export_objc(model){
+	const scale = model.scale.x
+	const objc = {}
+	if (model.type === 'Group') {
+		model.children.forEach(function(mesh){
+			if (mesh.type === 'Mesh') {
+				objc[mesh.name] = mesh_to_objc(mesh, scale)
+			}
+		})
+	}
+	return objc
+}
+
+function load_obj(obj,opts){
+}
+
+function merge_object(obj1,obj2){
+	const obj = {}
+	obj1 = obj1 || {}
+	obj2 = obj2 || {}
+	for(let k in obj1){
+		obj[k] = obj1[k]
+	}
+	for(let k in obj2){
+		obj[k] = obj2[k]
+	}
+	return obj
+}
+
 function load_objc(obj,opts){
 	opts = opts || {}
 	const group = new THREE.Group()
 	let color_idx = 0
 	for(let part_name in obj){
 		const data = obj[part_name]
-		const meta = opts[part_name] || data.meta || {}
+		const meta = merge_object(opts[part_name], data.meta)
 		const geometry = new THREE.BufferGeometry()
-		const material = new THREE.MeshBasicMaterial({color:get_color(color_idx++)})
-		if (data.positions) {
-			const attr = new THREE.Float32BufferAttribute(data.positions,3)
-			geometry.addAttribute('position', attr)
+		const material = new THREE.MeshBasicMaterial()
+
+		for(let key in data.geometry) {
+			const att = data.geometry[key]
+			if (key === 'index') {
+				const attr = new THREE.Uint16BufferAttribute(att.array, att.size)
+				geometry.setIndex(attr)
+			} else {
+				const attr = new THREE.Float32BufferAttribute(att.array, att.size)
+				geometry.addAttribute(key, attr)
+			}
 		}
-		if (data.indices) {
-			const attr = new THREE.Uint16BufferAttribute(data.indices,1)
-			geometry.setIndex(attr)
+		if (data.geometry.color) {
+			material.vertexColors = THREE.VertexColors
+			material.color = new THREE.Color(1,1,1)
+		} else {
+			material.color = get_color(color_idx++)
 		}
 		if (meta.offset) {
 			material.polygonOffset = true
