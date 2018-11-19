@@ -114,6 +114,11 @@ function read_file(file){
 			if (file_type===FileType.OBJC || file_type===FileType.OBJC_GZ) {
 				let str
 				if (file_type===FileType.OBJC_GZ) {
+					//const inflate = new Zlib.Inflate(buf)
+					//const str2 = inflate.decompress()
+					   //var inflate = new Zlib.Inflate( new Uint8Array( reader.getArrayBuffer( compressedLength ) ) )
+					   //var reader2 = new BinaryReader( inflate.decompress().buffer );
+
 					str = pako.inflate(buf,{to:'string'})
 				} else {
 					if (!decoder) {
@@ -128,14 +133,6 @@ function read_file(file){
 					fbx_loader = new THREE.FBXLoader()
 				}
 				const obj = fbx_loader.parse(buf)
-
-				//fbx单位已经被转成米了
-				//再转成经纬度*1000
-				//1度=1000单位=111km=111*1000米
-				//=>1单位=111米
-				//=>1米=1/111单位
-				//const s = 1/11100
-				//obj.scale.set(s,s,s)
 				scene.add(obj)
 
 				//因为要rescale，所以先隐藏起来，缩放完了再显示
@@ -234,9 +231,9 @@ function create_line(p1,p2,color){
 function init_coord_gizmo(){
 	const group = new THREE.Group()
 	const origin = new THREE.Vector3(0,0,0)
-	const line_x = create_line(origin, new THREE.Vector3(1000,0,0), 'red')
-	const line_y = create_line(origin, new THREE.Vector3(0,1000,0), 'green')
-	const line_z = create_line(origin, new THREE.Vector3(0,0,1000), 'blue')
+	const line_x = create_line(origin, new THREE.Vector3(100,0,0), 'red')
+	const line_y = create_line(origin, new THREE.Vector3(0,100,0), 'green')
+	const line_z = create_line(origin, new THREE.Vector3(0,0,100), 'blue')
 	group.add(line_x,line_y,line_z)
 	scene.add(group)
 }

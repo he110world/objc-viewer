@@ -3537,14 +3537,10 @@ THREE.FBXLoader = ( function () {
 
 					}
 
-					if ( typeof Zlib === 'undefined' ) {
-
-						console.error( 'THREE.FBXLoader: External library Inflate.min.js required, obtain or import from https://github.com/imaya/zlib.js' );
-
-					}
-
-					var inflate = new Zlib.Inflate( new Uint8Array( reader.getArrayBuffer( compressedLength ) ) ); // eslint-disable-line no-undef
-					var reader2 = new BinaryReader( inflate.decompress().buffer );
+					//改成pako解压缩
+					var arr_buf = reader.getArrayBuffer( compressedLength )
+					var buf = pako.inflate(arr_buf)
+					reader2 = new BinaryReader(buf.buffer)
 
 					switch ( type ) {
 
