@@ -1,3 +1,4 @@
+const bm_loader = new BareMetal()
 let dropArea = document.getElementById("drop-area")
 
 // Prevent default drag behaviors
@@ -66,9 +67,14 @@ const FileType = {
 	OBJC:2,
 	OBJC_GZ:3,
 	FBX:4,
+	PRWM:5,
+	MD2:6,
+	BARE_METAL:7,
 
-	PNG:10,
-	JPG:11,
+	MTL:10,
+
+	PNG:20,
+	JPG:21,
 }
 
 function get_file_type(file){
@@ -88,6 +94,15 @@ function get_file_type(file){
 			break
 		case '.fbx':
 			type = FileType.FBX
+			break
+		case '.prwm':
+			type = FileType.PRWM
+			break
+		case '.md2':
+			type = FileType.MD2
+			break
+		case '.bm':
+			type = FileType.BARE_METAL
 			break
 		case '.png':
 			type = FileType.PNG
@@ -121,8 +136,11 @@ function read_file(file){
 					}
 					str = decoder.decode(buf)
 				}
+				console.time('objc')
 				const obj = JSON.parse(str)
 				current_obj = load_objc(obj,debug_opts)
+				current_obj.name = file.name
+				console.timeEnd('objc')
 			} else if (file_type===FileType.FBX) {
 				if (!fbx_loader) {
 					fbx_loader = new THREE.FBXLoader()
@@ -133,8 +151,30 @@ function read_file(file){
 				//因为要rescale，所以先隐藏起来，缩放完了再显示
 				obj.visible = false
 				current_obj = obj
+				current_obj.name = file.name
 
 				need_rescale = true
+			} else if (file_type===FileType.PRWM) {
+				console.time('prwm')
+
+				const obj = load_prwm(buf)
+				scene.add(obj)
+
+				console.timeEnd('prwm')
+			} else if (file_type===FileType.BARE_METAL) {
+				console.time('bm')
+
+				const obj = load_bm(buf)
+				scene.add(obj)
+
+				console.timeEnd('bm')
+			} else if (file_type===FileType.MD2) {
+				console.time('md2')
+
+				load_md2(buf)
+				need_rescale = true
+
+				console.timeEnd('md2')
 			} else if (file_type===FileType.PNG) {
 				window.image_dict[file.name] = window.URL.createObjectURL( new Blob( [buf], { type: 'image/png'} ) )
 			} else if (file_type===FileType.JPG) {
@@ -146,6 +186,49 @@ function read_file(file){
 		}
 	}
 	reader.readAsArrayBuffer(file)
+}
+
+function load_md2(buf){
+	const model = new MD2Model()
+	model.OnLoad = function(){
+		const geometry = new THREE.BufferGeometry()
+		const material = new THREE.MeshBasicMaterial({morphTargets:true})
+
+		geometry.morphAttributes.position = []
+
+		const indices = []
+		for(let i=0; i<this.header.numberOfTriangles; i++){
+			indices.push(this.triangles[i].verticumIndices[2], this.triangles[i].verticumIndices[1], this.triangles[i].verticumIndices[0])
+		}
+
+		for(let i=0; i<this.header.numberOfFrames; i++){
+			const pos_array = []
+			const f = this.frames[i]
+			for(let j=0; j<this.header.numberOfVertices; j++){
+				const x = f.vertices[j].position[1] * f.scale[1] + f.translation[1]
+				const y = f.vertices[j].position[2] * f.scale[2] + f.translation[2]
+				const z = f.vertices[j].position[0] * f.scale[0] + f.translation[0]
+				pos_array.push(x,y,z)
+			}
+			const attr  = new THREE.Float32BufferAttribute(pos_array,3)
+			attr.name = f.name
+			geometry.morphAttributes.position[i] = attr
+			if (i===0) {
+				geometry.addAttribute('position', attr)
+			}
+		}
+		geometry.setIndex(new THREE.Uint16BufferAttribute(indices,1))
+
+		const mesh = new MorphMesh(geometry, material)
+		mesh.parseAnimations()
+		mesh.playAnimation(mesh.geometry.firstAnimation,12)
+		scene.add(mesh)
+
+		//for rescale
+		mesh.visible = false
+		current_obj = mesh
+	}
+	model.Parse(buf)
 }
 
 function rescale_model(fuzzy_meters){
@@ -458,7 +541,10 @@ function export_objc(model){
 	return objc
 }
 
-function load_obj(obj,opts){
+function export_model(model){
+}
+
+function load_obj(obj,mtl,opts){
 }
 
 function merge_object(obj1,obj2){
@@ -472,6 +558,119 @@ function merge_object(obj1,obj2){
 		obj[k] = obj2[k]
 	}
 	return obj
+}
+
+function export_bm_geometry(input,output){
+	//转成BufferGeometry
+	output = output || {}
+	if (input.type !== 'BufferGeometry') {
+		input = new THREE.BufferGeometry().fromGeometry(input)
+	}
+	output.attributes = {}
+	for(let key in input.attributes){
+		//不要输出attributes里的临时的morphTarget
+		if (key.indexOf('morphTarget') !== -1) {
+			continue
+		}
+
+		const attr = input.attributes[key]
+		const attr_out = {}
+		attr_out.array = attr.array
+		attr_out.itemSize = attr.itemSize
+		output.attributes[key] = attr_out
+	}
+
+	if (Object.keys(input.morphAttributes).length>0) {
+		output.morphAttributes = {}
+		for(let morph_key in input.morphAttributes){
+			const list = []
+			for(let i=0; i<input.morphAttributes[morph_key].length; i++){
+				const attr = input.morphAttributes[morph_key][i]
+				const attr_out = {}
+				attr_out.array = attr.array
+				attr_out.itemSize = attr.itemSize
+				attr_out.name = attr.name
+				list.push(attr_out)
+			}
+			output.morphAttributes[morph_key] = list
+		}
+	}
+	if (input.index) {
+		const attr = input.index
+		const attr_out = {}
+		attr_out.array = attr.array
+		attr_out.itemSize = attr.itemSize
+		output.index = attr_out
+	}
+	return output
+}
+
+function export_bm_r(input,output){
+	output = output || {}
+	if (input.geometry) {
+		output.geometry = export_bm_geometry(input.geometry)
+	}
+	if (input.children.length>0) {
+		output.children = []
+		for(let i=0; i<input.children.length; i++){
+			output.children.push(export_bm_r(input.children[i]))
+		}
+	}
+
+	if (input.name) {
+		output.name = input.name
+	}
+	return output
+}
+
+const save_binary = (function () {
+	const a = document.createElement("a")
+	document.body.appendChild(a)
+	a.style = "display: none"
+	return function (data, name) {
+		const blob = new Blob([data], {type: "octet/stream"})
+		const url = window.URL.createObjectURL(blob)
+		a.href = url
+		a.download = name
+		a.click()
+		window.URL.revokeObjectURL(url)
+	}
+}())
+
+function export_bm(input){
+	const output = export_bm_r(input)
+	const array_buffer = bm_loader.encode(output)
+	const array = new Uint8Array(array_buffer)
+	const bm = pako.deflate(array,{gzip:true})
+	save_binary(bm,'test.bm.gz')
+}
+
+function load_bm(buf){
+	const json = bm_loader.decode(buf)
+	const geometry = new THREE.BufferGeometry()
+	const material = new THREE.MeshBasicMaterial()
+}
+
+function load_prwm(buf){
+	const data = decodePrwm(buf)
+	const geometry = new THREE.BufferGeometry()
+	const material = new THREE.MeshBasicMaterial()
+
+	for(let key in data.attributes){
+		const attr_raw = data.attributes[key]
+		const attr = new THREE.BufferAttribute(attr_raw.values, attr_raw.cardinality)
+		geometry.addAttribute(key, attr)
+		if (key === 'color') {
+			material.vertexColors = THREE.VertexColors
+			material.color = new THREE.Color(1,1,1)
+		}
+	}
+
+	if (data.indices) {
+		geometry.setIndex(data.indices)
+	}
+
+	return new THREE.Mesh(geometry, material)
 }
 
 function load_objc(obj,opts){
@@ -514,11 +713,7 @@ function load_objc(obj,opts){
 function init() {
 
 	container = document.getElementById('canvas-area')
-	//container = document.createElement('div');
-	//document.body.appendChild(container);
-
-
-	camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 10000);
+	camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
 	camera.position.z = 3;
 
 
@@ -535,7 +730,7 @@ function init() {
 	controls = new THREE.OrbitControls(camera, renderer.domElement);
 	controls.enableDamping = true;
 	controls.dampingFactor = 0.25;
-	controls.enableZoom = false;
+	controls.enableZoom = true;
 
 	init_coord_gizmo()
 
@@ -603,6 +798,10 @@ function animate() {
 	}
 
 	requestAnimationFrame(animate);
+
+	if (current_obj && current_obj.updateAnimation) {
+		current_obj.updateAnimation(1000/60)
+	}
 
 	controls.update();
 
