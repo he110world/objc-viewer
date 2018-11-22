@@ -24,17 +24,15 @@ function get_array_type(obj){
 	return ArrayTypeNames.indexOf(obj.constructor.name)
 }
 
-function encode_r(obj,ta_list,ta_obj,key_stack){
+function encode_r(obj,ta_list,ta_obj,key_stack,ctx){
 	key_stack = key_stack || []
 	for(let key in obj){
 		const child_obj = obj[key]
 		if(typeof child_obj === 'object'){
-			key_stack.push(key)
-
 			const type = get_array_type(child_obj)
 			if (type>0) {
 				let to = ta_obj
-				for(let i=0; i<key_stack.length-1; i++){
+				for(let i=0; i<key_stack.length; i++){
 					const k = key_stack[i]
 					to[k] = to[k] || {}
 					to = to[k]
@@ -45,13 +43,18 @@ function encode_r(obj,ta_list,ta_obj,key_stack){
 					type:type,
 					array:child_obj,
 					obj:obj,
-					key:key
+					key:key,
+					offset:ctx.offset
 				})
+
+				ctx.offset = padding4(ctx.offset + child_obj.byteLength)
+
 			} else {
-				encode_r(child_obj,ta_list,ta_obj,key_stack)
+				key_stack.push(key)
+				encode_r(child_obj,ta_list,ta_obj,key_stack,ctx)
+				key_stack.pop()
 			}
 
-			key_stack.pop()
 		}
 	}
 }
@@ -81,43 +84,33 @@ function BareMetal (){
 BareMetal.prototype.encode = function(input_obj){
 	const ta_list = []
 	const ta_obj = {}
-	encode_r(input_obj,ta_list,ta_obj)
+	encode_r(input_obj,ta_list,ta_obj,[],{offset:8})
 
 	let ta_len = 0
 	if (ta_list.length>0) {
 		for(let i=0; i<ta_list.length; i++){
 			const ta = ta_list[i]
 
-			//改写成[type,offset,length]
-			//offset和len写成长度为10的字串，否则JSON长度计算不出来
+			//改写成[type,offset,count]
+			//JSON必须放在文件最后，否则
 			//JSON长度不确定<->offset不确定
-			ta.obj[ta.key] = {type:ta.type, ofs:'0000000000', len:ta.array.length}
+			ta.obj[ta.key] = [ta.type,ta.offset,ta.array.length]
 
 			ta_len += padding4(ta.array.byteLength)
 		}
 		input_obj.__keys = ta_obj
 	}
 
-	let json_str = JSON.stringify(input_obj)
+	const json_str = JSON.stringify(input_obj)
 	const json_len = json_str.length
 
-	//header: ['BARE',json_str.length]
+	//header: ['BARE',json_offset]
 	const header_len = 8
-	let offset = header_len + padding4(json_len)
-	const total_len = offset + ta_len
+	const total_len = header_len + ta_len + json_len
 
 	const buffer = new ArrayBuffer(total_len)
 	const array = new Uint8Array(buffer)
 	const view = new DataView(buffer)
-
-	//计算偏移量
-	if (ta_list.length>0) {
-		for(let i=0; i<ta_list.length; i++){
-			const ta = ta_list[i]
-			ta.obj[ta.key].ofs = offset.toString().padStart(10,'0')
-			offset += padding4(ta.array.byteLength)
-		}
-	}
 
 	let pos = 0
 
@@ -128,31 +121,26 @@ BareMetal.prototype.encode = function(input_obj){
 		const c = magic.charCodeAt(i)
 		view.setUint8(pos++,c)
 	}
-	//json长度：4字节
-	view.setUint32(pos,json_len)
+	//json在哪里：4字节
+	view.setUint32(pos,header_len+ta_len)
 	pos+=4
-
-	//typed array长度：4字节
-	//view.setUint32(pos,ta_len)
-	//pos+=4
-
-	//写JSON（offset已经更新过了）
-	json_str = JSON.stringify(input_obj)
-	for(let i=0; i<json_str.length; i++){
-		array[pos++] = json_str.charCodeAt(i)
-	}
-	pos = padding4(pos)
 
 	//写数组
 	if (ta_list.length>0) {
 		for(let i=0; i<ta_list.length; i++){
 			const ta = ta_list[i]
 			const write_array = new ta.array.constructor(buffer, pos, ta.array.length)
-			write_array.set(ta.array)//.subarray(0,ta.array.length))
-
+			write_array.set(ta.array)
 			pos = padding4(pos + ta.array.byteLength)
 		}
 	}
+
+	//写JSON
+	for(let i=0; i<json_str.length; i++){
+		array[pos++] = json_str.charCodeAt(i)
+	}
+	pos = padding4(pos)
+
 	return buffer
 }
 
@@ -167,17 +155,13 @@ BareMetal.prototype.decode = function(array_buffer){
 	}
 	pos += 4
 
-	//json长度
-	const json_len = read_int(array,pos)
+	//json 偏移量
+	const json_offset = read_int(array,pos)
 	pos += 4
 
-	//typed array长度
-	//const ta_len = read_int(array,pos)
-	//pos += 4
-	
 	//读json
 	//console.time(1.1)
-	const json_str = String.fromCharCode.apply(null,array.subarray(pos,pos+json_len))
+	const json_str = String.fromCharCode.apply(null,array.subarray(json_offset))
 	//console.timeEnd(1.1)
 
 	//console.time(1.2)
@@ -195,10 +179,9 @@ BareMetal.prototype.decode = function(array_buffer){
 			const obj = obj_stack.pop()
 			for(let key in node){
 				if (node[key]===1) {
-					const ta = obj[key] //typed array info
-					const offset = Number(ta.ofs)
-					const type = ArrayTypes[ta.type]
-					obj[key] = new type(array_buffer, offset, ta.len)
+					const ta = obj[key] //[type,offset,count]
+					const type = ArrayTypes[ta[0]]
+					obj[key] = new type(array_buffer, ta[1], ta[2])
 				} else {
 					key_stack.push(node[key])
 					obj_stack.push(obj[key])
